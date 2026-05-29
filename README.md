@@ -29,6 +29,11 @@ into a single playable file.
   (fMP4) streams are assembled natively. Falls back to raw `.ts` if transmuxing
   fails.
 - **Byte‑range, discontinuity and fMP4 init‑segment support.**
+- **Vimeo adaptive support** — recognises Vimeo's custom `master.json` /
+  `playlist.json` manifest (the `vimeocdn.com` adaptive CDN), lets you pick a
+  quality, downloads the separate video + audio tracks and **merges them into a
+  single MP4** with a built‑in fMP4 muxer (no ffmpeg needed). Individual Vimeo
+  segments are no longer shown as dozens of stray "files".
 - **Direct file downloads** — `.mp4` / `.webm` / `.mkv` / `.m4a` … seen in
   traffic or referenced by `<video>` / `<source>` tags.
 - **Live progress** — per‑download progress, with cancel, in a Downloads tab.
@@ -91,6 +96,10 @@ Requires Chrome 116+ (uses the offscreen documents and `chrome.runtime.getContex
   `<video>`/`<source>` URLs as a supplement to network detection.
 - **`src/lib/m3u8-parser.js`** — dependency‑free HLS parser (master + media
   playlists, keys, maps, byte‑ranges).
+- **`src/lib/vimeo-parser.js`** — parser for Vimeo's adaptive JSON manifest.
+- **`src/lib/fmp4-muxer.js`** — tiny dependency‑free fragmented‑MP4 muxer that
+  combines a video‑only and an audio‑only fMP4 into one 2‑track MP4 (used for
+  Vimeo, where audio and video are always separate).
 - **`src/lib/mux.min.js`** — vendored [mux.js](https://github.com/videojs/mux.js)
   6.3.0 (Apache‑2.0) for MPEG‑TS → MP4.
 
@@ -107,11 +116,24 @@ scripts couldn't (no CORS wall).
 | HLS, MPEG‑TS segments (muxed A/V) | ✅ downloaded and transmuxed to MP4 |
 | HLS, fMP4 segments (muxed A/V) | ✅ assembled natively to MP4 |
 | HLS with AES‑128 (`identity` key) | ✅ decrypted |
+| **Vimeo** adaptive (`master.json` / `playlist.json`) | ✅ quality pick + video/audio merged into one MP4 |
 | Direct `.mp4` / `.webm` / `.mkv` / `.m4a` … | ✅ downloaded |
 | HLS with **separate** audio + video renditions | ⚠️ downloaded as two files; merge with e.g. ffmpeg (see below) |
 | Live streams | ⚠️ best‑effort: only currently‑listed segments |
 | DRM (Widevine / FairPlay / PlayReady, `SAMPLE-AES`) | ❌ not supported by design |
 | DASH (`.mpd`) | ❌ not handled in this version |
+
+### Vimeo
+
+Many sites (e.g. course platforms) embed Vimeo, which streams via a custom JSON
+manifest plus byte‑range segments rather than `.m3u8`/`.mpd`. The extension
+detects the manifest, shows the available qualities, and downloads the chosen
+video together with the best audio, **muxing them into a single `.mp4`** in the
+browser. If muxing ever fails it falls back to saving the video and audio as two
+files. Detection happens when the player first loads the manifest (usually on
+page load, before you press play) — if you only see segments, reload the page
+with the extension active. Vimeo's signed manifest URLs are short‑lived, so
+download soon after the video loads.
 
 ### Separate audio/video
 

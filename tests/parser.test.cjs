@@ -5,6 +5,8 @@
 const assert = require('assert');
 const M3U8 = require('../src/lib/m3u8-parser.js');
 const U = require('../src/lib/util.js');
+const Vimeo = require('../src/lib/vimeo-parser.js');
+const Muxer = require('../src/lib/fmp4-muxer.js');
 
 let passed = 0;
 function test(name, fn) {
@@ -196,6 +198,81 @@ test('humanSize: scales units', () => {
 });
 test('variantLabel: resolution + bitrate', () => {
   assert.strictEqual(U.variantLabel({ resolution: { width: 1920, height: 1080 }, bandwidth: 4200000 }), '1080p · 4.2 Mbps');
+});
+
+console.log('vimeo-parser');
+
+const VIMEO_MANIFEST_URL =
+  'https://vod-adaptive-ak.vimeocdn.com/exp=123/cid/psid=xyz/v2/playlist/av/primary/playlist.json?pathsig=abc';
+const VIMEO_JSON = JSON.stringify({
+  clip_id: 'abc',
+  base_url: '../../../remux/avf/',
+  video: [
+    { id: 'v1', base_url: 'v1hash/', width: 640, height: 360, bitrate: 800000, codecs: 'avc1.4d401e', init_segment: 'AAAA',
+      segments: [{ start: 0, end: 6, url: 'segment.m4s?sid=1', size: 1000 }, { start: 6, end: 12, url: 'segment.m4s?sid=2' }] },
+    { id: 'v2', base_url: 'v2hash/', width: 1920, height: 1080, bitrate: 5000000, codecs: 'avc1.640028', init_segment: 'BBBB',
+      segments: [{ start: 0, end: 6, url: 'segment.m4s?sid=1' }] },
+  ],
+  audio: [
+    { id: 'a1', base_url: 'a1hash/', bitrate: 128000, channels: 2, sample_rate: 48000, codecs: 'mp4a.40.2', init_segment: 'CCCC',
+      segments: [{ start: 0, end: 6, url: 'segment.m4s?sid=1' }] },
+  ],
+});
+
+test('vimeo: sorts video renditions best-first', () => {
+  const m = Vimeo.parse(VIMEO_JSON, VIMEO_MANIFEST_URL);
+  assert.strictEqual(m.type, 'vimeo');
+  assert.strictEqual(m.video.length, 2);
+  assert.strictEqual(m.video[0].id, 'v2', '1080p first');
+  assert.strictEqual(m.video[1].id, 'v1');
+  assert.strictEqual(m.audio[0].id, 'a1');
+  assert.strictEqual(m.audio[0].channels, 2);
+});
+
+test('vimeo: resolves 3-level segment URLs to absolute', () => {
+  const m = Vimeo.parse(VIMEO_JSON, VIMEO_MANIFEST_URL);
+  const v1 = m.video.find((v) => v.id === 'v1');
+  assert.strictEqual(
+    v1.segments[0].url,
+    'https://vod-adaptive-ak.vimeocdn.com/exp=123/cid/psid=xyz/v2/remux/avf/v1hash/segment.m4s?sid=1'
+  );
+  assert.strictEqual(v1.segments.length, 2);
+});
+
+test('vimeo: preserves base64 init segment', () => {
+  const m = Vimeo.parse(VIMEO_JSON, VIMEO_MANIFEST_URL);
+  assert.strictEqual(m.video.find((v) => v.id === 'v2').initBase64, 'BBBB');
+  assert.strictEqual(m.audio[0].initBase64, 'CCCC');
+});
+
+test('vimeo: looksLikeVimeo distinguishes manifests', () => {
+  assert.strictEqual(Vimeo.looksLikeVimeo(VIMEO_JSON), true);
+  assert.strictEqual(Vimeo.looksLikeVimeo('{"foo":1}'), false);
+  assert.strictEqual(Vimeo.looksLikeVimeo('not json'), false);
+});
+
+console.log('fmp4-muxer');
+
+function mp4box(size, type) {
+  const b = Buffer.alloc(8);
+  b.writeUInt32BE(size, 0);
+  b.write(type, 4, 'latin1');
+  return b;
+}
+
+test('fmp4-muxer: box walker reads type and size', () => {
+  const buf = new Uint8Array(Buffer.concat([mp4box(16, 'ftyp'), Buffer.alloc(8), mp4box(12, 'free'), Buffer.alloc(4)]));
+  const boxes = Muxer.boxes(buf);
+  assert.strictEqual(boxes.length, 2);
+  assert.strictEqual(boxes[0].type, 'ftyp');
+  assert.strictEqual(boxes[0].size, 16);
+  assert.strictEqual(boxes[1].type, 'free');
+  assert.strictEqual(boxes[1].size, 12);
+});
+
+test('fmp4-muxer: mux rejects non-fragmented input', () => {
+  const notFmp4 = new Uint8Array(Buffer.concat([mp4box(16, 'ftyp'), Buffer.alloc(8)]));
+  assert.throws(() => Muxer.mux(notFmp4, notFmp4), /ftyp\/moov|fragmented/);
 });
 
 console.log('\n' + passed + ' checks passed' + (process.exitCode ? ' (with failures above)' : ''));

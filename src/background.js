@@ -49,6 +49,15 @@ const HLS_CT = /mpegurl/i;
 const DIRECT_EXT = /\.(mp4|m4v|webm|mkv|mov|m4a|mp3|aac|ogg|ogv|wav|flac|avi|3gp)(\?|#|$)/i;
 const SEGMENT_EXT = /\.(ts|m4s)(\?|#|$)/i;
 const SEGMENT_HINT = /[._/-](init|seg|segment|chunk|frag|fragment)[._-]?\d*/i;
+const VIMEO_MANIFEST = /\/(master|playlist)\.json(\?|#|$)/i;
+
+function isVimeoHost(url) {
+  try {
+    return /(^|\.)vimeocdn\.com$/i.test(new URL(url).hostname);
+  } catch (e) {
+    return false;
+  }
+}
 
 function headerValue(headers, name) {
   if (!headers) return '';
@@ -64,6 +73,14 @@ function isLikelySegment(url) {
 function classify(url, contentType, contentLength) {
   const ct = (contentType || '').toLowerCase();
   if (/^(blob|data|chrome-extension):/.test(url)) return null;
+
+  // Vimeo adaptive delivery: surface only the JSON manifest, never the many
+  // byte-range segments (which would otherwise appear as dozens of "files").
+  if (isVimeoHost(url)) {
+    if (VIMEO_MANIFEST.test(url)) return { kind: 'vimeo' };
+    if (/\.m3u8(\?|#|$)/i.test(url)) return { kind: 'hls' };
+    return null;
+  }
 
   // HLS manifests: by content-type or by .m3u8 extension.
   if (HLS_CT.test(ct) || /\.m3u8(\?|#|$)/i.test(url)) return { kind: 'hls' };
@@ -131,7 +148,9 @@ chrome.webRequest.onHeadersReceived.addListener(
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (details.tabId < 0) return;
-    if (/\.m3u8(\?|#|$)/i.test(details.url)) {
+    if (isVimeoHost(details.url) && VIMEO_MANIFEST.test(details.url)) {
+      recordMedia(details.tabId, { url: details.url, kind: 'vimeo', mime: '', size: 0 });
+    } else if (/\.m3u8(\?|#|$)/i.test(details.url)) {
       recordMedia(details.tabId, { url: details.url, kind: 'hls', mime: '', size: 0 });
     }
   },
@@ -276,21 +295,31 @@ async function startDownload(job) {
 }
 
 function findJobByDownloadId(downloadId) {
-  return Object.values(state.jobs).find((j) => j.downloadId === downloadId);
+  return Object.values(state.jobs).find(
+    (j) => j.downloadId === downloadId || (j.downloads || []).some((d) => d.downloadId === downloadId)
+  );
 }
 
-// React to chrome.downloads completion for both direct files and the final
-// save of an assembled HLS blob.
+// React to chrome.downloads completion for direct files and for each assembled
+// blob a job saves (an HLS/Vimeo job may emit more than one file).
 chrome.downloads.onChanged.addListener((delta) => {
   ready.then(() => {
     const job = findJobByDownloadId(delta.id);
     if (!job) return;
-    if (delta.state && delta.state.current === 'complete') {
-      setJob(job.jobId, { status: 'saved', phase: 'done', progress: 1 });
-      if (job.objectUrl) sendToOffscreen({ cmd: 'revoke', url: job.objectUrl });
-    } else if (delta.state && delta.state.current === 'interrupted') {
+    const dl = (job.downloads || []).find((d) => d.downloadId === delta.id);
+    const cur = delta.state && delta.state.current;
+    if (cur === 'complete') {
+      if (dl) { dl.done = true; sendToOffscreen({ cmd: 'revoke', url: dl.objectUrl }); }
+      else if (job.objectUrl) sendToOffscreen({ cmd: 'revoke', url: job.objectUrl });
+      const multi = job.downloads && job.downloads.length;
+      const allDone = multi
+        ? job.downloads.length >= (job.expectedOutputs || 1) && job.downloads.every((d) => d.done)
+        : true;
+      if (allDone) setJob(job.jobId, { status: 'saved', phase: 'done', progress: 1 });
+      else persist();
+    } else if (cur === 'interrupted') {
       setJob(job.jobId, { status: 'error', message: (delta.error && delta.error.current) || 'interrupted' });
-      if (job.objectUrl) sendToOffscreen({ cmd: 'revoke', url: job.objectUrl });
+      sendToOffscreen({ cmd: 'revoke', url: dl ? dl.objectUrl : job.objectUrl });
     }
   });
 });
@@ -335,19 +364,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.cmd === 'ready') {
     const job = state.jobs[msg.jobId];
     if (!job) return false;
-    const filename = msg.filename || ensureExtension(job.filename, msg.ext || 'mp4');
-    setJob(msg.jobId, { status: 'saving', phase: 'saving', objectUrl: msg.objectUrl, size: msg.size || job.total });
-    chrome.downloads.download(
-      { url: msg.objectUrl, filename, conflictAction: 'uniquify', saveAs: false },
-      (downloadId) => {
-        if (chrome.runtime.lastError || downloadId == null) {
-          setJob(msg.jobId, { status: 'error', message: (chrome.runtime.lastError || {}).message || 'save failed' });
-          sendToOffscreen({ cmd: 'revoke', url: msg.objectUrl });
-        } else {
-          setJob(msg.jobId, { downloadId, filename });
+    // offscreen provides one or more outputs (a Vimeo job that can't be muxed
+    // falls back to separate video + audio files).
+    const outputs = msg.outputs || [{ objectUrl: msg.objectUrl, filename: msg.filename, size: msg.size }];
+    job.downloads = [];
+    job.expectedOutputs = outputs.length;
+    let totalSize = 0;
+    outputs.forEach((o) => { totalSize += o.size || 0; });
+    setJob(msg.jobId, { status: 'saving', phase: 'saving', size: totalSize || job.total, note: msg.note || '' });
+    outputs.forEach((o) => {
+      const filename = o.filename || ensureExtension(job.filename, 'mp4');
+      chrome.downloads.download(
+        { url: o.objectUrl, filename, conflictAction: 'uniquify', saveAs: false },
+        (downloadId) => {
+          if (chrome.runtime.lastError || downloadId == null) {
+            setJob(msg.jobId, { status: 'error', message: (chrome.runtime.lastError || {}).message || 'save failed' });
+            sendToOffscreen({ cmd: 'revoke', url: o.objectUrl });
+          } else {
+            job.downloads.push({ downloadId, objectUrl: o.objectUrl, done: false });
+            persist();
+          }
         }
-      }
-    );
+      );
+    });
     return false;
   }
   if (msg.cmd === 'error') {
@@ -365,8 +404,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     ready.then(() => {
       const job = state.jobs[msg.jobId];
       if (!job) return sendResponse({ ok: false });
-      if (job.kind === 'hls') sendToOffscreen({ cmd: 'cancel', jobId: msg.jobId });
+      if (job.kind === 'hls' || job.kind === 'vimeo') sendToOffscreen({ cmd: 'cancel', jobId: msg.jobId });
       if (job.downloadId != null) chrome.downloads.cancel(job.downloadId).catch(() => {});
+      (job.downloads || []).forEach((d) => chrome.downloads.cancel(d.downloadId).catch(() => {}));
       setJob(msg.jobId, { status: 'canceled', phase: 'canceled' });
       sendResponse({ ok: true });
     });

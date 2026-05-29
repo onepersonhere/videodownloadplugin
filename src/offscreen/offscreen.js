@@ -95,6 +95,131 @@ function ensureExt(base, ext) {
   return new RegExp('\\.' + ext + '$', 'i').test(clean) ? clean : `${clean}.${ext}`;
 }
 
+function concatU8(list) {
+  let n = 0;
+  for (const a of list) n += a.length;
+  const out = new Uint8Array(n);
+  let p = 0;
+  for (const a of list) {
+    out.set(a, p);
+    p += a.length;
+  }
+  return out;
+}
+
+function base64ToUint8(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+// "start-end" byte range -> { offset, length } for a Range header.
+function parseRange(range) {
+  const m = /(\d+)-(\d+)/.exec(range);
+  if (!m) return null;
+  const offset = +m[1];
+  return { offset, length: +m[2] - offset + 1 };
+}
+
+// Vimeo adaptive download: assemble the chosen video + audio tracks (init +
+// segments) and mux them into one MP4. Falls back to two files if muxing fails.
+async function runVimeo(job) {
+  const jobId = job.jobId;
+  const ctrl = { canceled: false };
+  controllers.set(jobId, ctrl);
+
+  try {
+    const text = await fetchText(job.url, ctrl);
+    const man = VimeoManifest.parse(text, job.url);
+    if (!man.video.length && !man.audio.length) throw new Error('No tracks found in Vimeo manifest');
+
+    const video = job.videoId ? man.video.find((v) => v.id === job.videoId) : man.video[0];
+    const audio = job.audioId ? man.audio.find((a) => a.id === job.audioId) : man.audio[0];
+    if (!video && !audio) throw new Error('No playable track in Vimeo manifest');
+
+    const totalSegs = (video ? video.segments.length : 0) + (audio ? audio.segments.length : 0);
+    let doneSegs = 0;
+    let receivedBytes = 0;
+    let lastReport = 0;
+    function report(phase, force) {
+      const now = Date.now();
+      if (force || now - lastReport > 250) {
+        lastReport = now;
+        post({ cmd: 'progress', jobId, phase: phase || 'fetching', progress: totalSegs ? doneSegs / totalSegs : 0, received: receivedBytes, segments: totalSegs, done: doneSegs });
+      }
+    }
+
+    async function assemble(rend) {
+      const parts = [];
+      if (rend.initBase64) parts.push(base64ToUint8(rend.initBase64));
+      else if (rend.initUrl) parts.push(new Uint8Array(await fetchBuffer(rend.initUrl, null, ctrl)));
+
+      const results = new Array(rend.segments.length);
+      let next = 0;
+      async function worker() {
+        for (;;) {
+          if (ctrl.canceled) throw new Error('canceled');
+          const i = next++;
+          if (i >= rend.segments.length) return;
+          const seg = rend.segments[i];
+          const buf = await fetchBuffer(seg.url, seg.range ? parseRange(seg.range) : null, ctrl);
+          results[i] = new Uint8Array(buf);
+          doneSegs++;
+          receivedBytes += results[i].byteLength;
+          report('fetching');
+        }
+      }
+      const pool = [];
+      for (let w = 0; w < Math.min(CONCURRENCY, rend.segments.length); w++) pool.push(worker());
+      await Promise.all(pool);
+      for (const u of results) parts.push(u);
+      return concatU8(parts);
+    }
+
+    const videoBuf = video ? await assemble(video) : null;
+    const audioBuf = audio ? await assemble(audio) : null;
+    if (ctrl.canceled) throw new Error('canceled');
+    report('assembling', true);
+    post({ cmd: 'progress', jobId, phase: 'assembling', progress: 1, received: receivedBytes, segments: totalSegs, done: doneSegs });
+
+    const base = job.filename || 'video';
+    const makeUrl = (u8, mime) => {
+      const url = URL.createObjectURL(new Blob([u8], { type: mime }));
+      objectUrls.add(url);
+      return url;
+    };
+
+    if (videoBuf && audioBuf) {
+      try {
+        const merged = FMP4Muxer.mux(videoBuf, audioBuf);
+        post({ cmd: 'ready', jobId, outputs: [{ objectUrl: makeUrl(merged, 'video/mp4'), filename: ensureExt(base, 'mp4'), size: merged.length }] });
+      } catch (e) {
+        // Robust fallback: deliver both tracks as separate, always-valid files.
+        post({ cmd: 'log', jobId, message: 'mux failed, saving separate files: ' + e.message });
+        post({
+          cmd: 'ready',
+          jobId,
+          note: 'Muxing failed — saved video and audio as separate files.',
+          outputs: [
+            { objectUrl: makeUrl(videoBuf, 'video/mp4'), filename: ensureExt(base + ' (video)', 'mp4'), size: videoBuf.length },
+            { objectUrl: makeUrl(audioBuf, 'audio/mp4'), filename: ensureExt(base + ' (audio)', 'm4a'), size: audioBuf.length },
+          ],
+        });
+      }
+    } else if (videoBuf) {
+      post({ cmd: 'ready', jobId, outputs: [{ objectUrl: makeUrl(videoBuf, 'video/mp4'), filename: ensureExt(base, 'mp4'), size: videoBuf.length }] });
+    } else {
+      post({ cmd: 'ready', jobId, outputs: [{ objectUrl: makeUrl(audioBuf, 'audio/mp4'), filename: ensureExt(base, 'm4a'), size: audioBuf.length }] });
+    }
+  } catch (e) {
+    if (String(e && e.message) === 'canceled') return;
+    post({ cmd: 'error', jobId, message: String((e && e.message) || e) });
+  } finally {
+    controllers.delete(jobId);
+  }
+}
+
 async function runHls(job) {
   const jobId = job.jobId;
   const ctrl = { canceled: false };
@@ -225,7 +350,7 @@ async function runHls(job) {
 
     const objectUrl = URL.createObjectURL(blob);
     objectUrls.add(objectUrl);
-    post({ cmd: 'ready', jobId, objectUrl, filename: ensureExt(job.filename || 'video', ext), ext, size: blob.size });
+    post({ cmd: 'ready', jobId, outputs: [{ objectUrl, filename: ensureExt(job.filename || 'video', ext), size: blob.size }] });
   } catch (e) {
     if (String(e && e.message) === 'canceled') return; // service worker already marked it
     post({ cmd: 'error', jobId, message: String((e && e.message) || e) });
@@ -237,7 +362,8 @@ async function runHls(job) {
 chrome.runtime.onMessage.addListener((msg) => {
   if (!msg || msg.target !== 'offscreen') return;
   if (msg.cmd === 'download') {
-    runHls(msg.job);
+    if (msg.job && msg.job.kind === 'vimeo') runVimeo(msg.job);
+    else runHls(msg.job);
   } else if (msg.cmd === 'cancel') {
     const ctrl = controllers.get(msg.jobId);
     if (ctrl) ctrl.canceled = true;

@@ -92,7 +92,40 @@ function sectionTitle(text) {
   return el('div', { class: 'opt-section-title', text });
 }
 
+async function buildVimeoOptions(item, optionsEl) {
+  optionsEl.replaceChildren(el('div', { class: 'opt-loading', text: 'Loading stream info…' }));
+  let man;
+  try {
+    const res = await fetch(item.url, { credentials: 'include' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    man = VimeoManifest.parse(await res.text(), item.url);
+  } catch (e) {
+    optionsEl.replaceChildren(
+      noticeNode('Could not read this Vimeo stream (' + e.message + ').', true),
+      optRow('Best quality', '', () => startJob({ kind: 'vimeo', url: item.url, filename: baseName(item), title: currentTitle }))
+    );
+    return;
+  }
+
+  const nodes = [];
+  nodes.push(noticeNode(man.audio.length ? 'Audio is merged into the MP4 automatically.' : 'No separate audio track was found.'));
+  const dur = man.video[0] && man.video[0].duration ? U.formatDuration(man.video[0].duration) : '';
+  nodes.push(sectionTitle('Video quality' + (dur ? ' · ' + dur : '')));
+  if (!man.video.length) nodes.push(noticeNode('No video renditions found.', true));
+  man.video.forEach((v) => {
+    const label = v.height ? v.height + 'p' : `${v.width}×${v.height}`;
+    const meta = [`${v.width}×${v.height}`, U.humanBitrate(v.bitrate), (v.codecs || '').split('.')[0]].filter(Boolean).join(' · ');
+    nodes.push(
+      optRow(label, meta, () =>
+        startJob({ kind: 'vimeo', url: item.url, videoId: v.id, filename: `${baseName(item)} ${label}`, title: currentTitle })
+      )
+    );
+  });
+  optionsEl.replaceChildren(...nodes);
+}
+
 async function buildOptions(item, optionsEl) {
+  if (item.kind === 'vimeo') return buildVimeoOptions(item, optionsEl);
   optionsEl.replaceChildren(el('div', { class: 'opt-loading', text: 'Loading stream info…' }));
   let parsed;
   try {
@@ -163,7 +196,10 @@ async function buildOptions(item, optionsEl) {
 /* ---------- media rendering ---------- */
 function mediaCard(item) {
   const isHls = item.kind === 'hls';
+  const isVimeo = item.kind === 'vimeo';
+  const isStream = isHls || isVimeo;
   const title = (() => {
+    if (isVimeo) return currentTitle || 'Vimeo video';
     try {
       const u = new URL(item.url);
       const last = u.pathname.split('/').filter(Boolean).pop() || u.hostname;
@@ -183,7 +219,7 @@ function mediaCard(item) {
   let built = false;
 
   const caret = el('span', { class: 'caret', text: '▾' });
-  const expandBtn = isHls
+  const expandBtn = isStream
     ? el('button', { class: 'icon-btn', title: 'Choose quality' }, [caret])
     : null;
 
@@ -191,7 +227,9 @@ function mediaCard(item) {
     class: 'btn',
     text: 'Download',
     onclick: () => {
-      if (isHls) {
+      if (isVimeo) {
+        startJob({ kind: 'vimeo', url: item.url, filename: baseName(item), title: currentTitle });
+      } else if (isHls) {
         startJob({ kind: 'hls', url: item.url, filename: baseName(item), title: currentTitle, mux: true });
       } else {
         startJob({ kind: 'direct', url: item.url, filename: baseName(item), title: currentTitle });
@@ -212,7 +250,7 @@ function mediaCard(item) {
   }
 
   const head = el('div', { class: 'card-head' }, [
-    el('span', { class: 'badge ' + (isHls ? 'hls' : 'direct'), text: isHls ? 'HLS' : 'FILE' }),
+    el('span', { class: 'badge ' + (isStream ? 'hls' : 'direct'), text: isVimeo ? 'VIMEO' : isHls ? 'HLS' : 'FILE' }),
     el('div', { class: 'card-main' }, [
       el('div', { class: 'card-title', title: item.url, text: title }),
       el('div', { class: 'card-sub', text: subParts.filter(Boolean).join(' · ') }),
@@ -227,8 +265,9 @@ function mediaCard(item) {
 function renderMedia(bucket) {
   const list = $('#media-list');
   const items = bucket ? Object.values(bucket.items) : [];
-  // HLS first, then direct; newest first within each group.
-  items.sort((a, b) => (a.kind === b.kind ? b.ts - a.ts : a.kind === 'hls' ? -1 : 1));
+  // Streams (HLS/Vimeo) first, then direct files; newest first within a group.
+  const rank = (k) => (k === 'direct' ? 1 : 0);
+  items.sort((a, b) => (rank(a.kind) === rank(b.kind) ? b.ts - a.ts : rank(a.kind) - rank(b.kind)));
 
   list.replaceChildren(...items.map(mediaCard));
   $('#media-count').textContent = String(items.length);
@@ -248,7 +287,7 @@ function jobStatusText(job) {
       if (job.kind === 'direct') return ['Downloading…', ''];
       return [`Downloading ${pct}%` + (job.received ? ' · ' + U.humanSize(job.received) : ''), ''];
     case 'saving': return ['Saving…', ''];
-    case 'saved': return ['Saved' + (job.size ? ' · ' + U.humanSize(job.size) : ''), 'ok'];
+    case 'saved': return ['Saved' + (job.size ? ' · ' + U.humanSize(job.size) : '') + (job.note ? ' · ' + job.note : ''), 'ok'];
     case 'error': return ['Failed: ' + (job.message || 'unknown error'), 'err'];
     case 'canceled': return ['Canceled', ''];
     default: return [job.status || '', ''];
@@ -274,7 +313,7 @@ function jobCard(job) {
 
   return el('div', { class: 'card' }, [
     el('div', { class: 'card-head' }, [
-      el('span', { class: 'badge ' + (job.kind === 'hls' ? 'hls' : 'direct'), text: job.kind === 'hls' ? 'HLS' : 'FILE' }),
+      el('span', { class: 'badge ' + (job.kind === 'direct' ? 'direct' : 'hls'), text: job.kind === 'vimeo' ? 'VIMEO' : job.kind === 'hls' ? 'HLS' : 'FILE' }),
       el('div', { class: 'card-main' }, [
         el('div', { class: 'card-title', text: job.filename || job.title || 'video' }),
       ]),
