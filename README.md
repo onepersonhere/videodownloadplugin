@@ -176,6 +176,23 @@ src/
 tests/parser.test.cjs  Node test suite for the pure logic
 ```
 
+## Automated builds & releases
+
+A GitHub Actions workflow (`.github/workflows/release.yml`) packages the
+extension on **every push to any branch**. It runs the test suite, zips the
+extension (`manifest.json` + `icons/` + `src/`), and publishes it to a single
+rolling pre-release tagged **`latest`** — so the newest build is always one
+download away:
+
+```
+https://github.com/onepersonhere/videodownloadplugin/releases/download/latest/hls-video-downloader.zip
+```
+
+The release is only updated when tests pass, so a broken commit never replaces
+the last good build. Concurrent pushes are serialized (newest wins) so they
+can't collide on the shared `latest` tag. You can also run it manually from the
+Actions tab (**Run workflow**).
+
 ## License
 
 MIT for the extension code in this repository. Bundled **mux.js** is licensed

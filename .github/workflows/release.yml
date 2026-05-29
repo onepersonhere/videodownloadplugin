@@ -1,0 +1,85 @@
+name: Package & Release
+
+# Build and publish the packaged extension on every push to any branch.
+# A single rolling pre-release tagged "latest" always holds the newest zip.
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+# Releases write to repo contents (releases + tags).
+permissions:
+  contents: write
+
+# Every push (any branch) updates the same "latest" release, so serialize runs
+# and let the newest push win instead of racing on the shared tag.
+concurrency:
+  group: rolling-latest-release
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Gate the release on the test suite so a broken commit never overwrites
+      # the last good "latest" build.
+      - name: Run tests
+        run: npm test
+
+      - name: Read manifest metadata
+        id: meta
+        run: |
+          version="$(node -p "require('./manifest.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # Icons are committed, but regenerating guarantees they exist and are
+      # deterministic for the package.
+      - name: Generate icons
+        run: python3 scripts/make-icons.py
+
+      - name: Package extension
+        run: |
+          set -euo pipefail
+          rm -f hls-video-downloader.zip
+          # Only the files the extension actually needs (manifest at zip root).
+          zip -r hls-video-downloader.zip manifest.json icons src -x '*.DS_Store' >/dev/null
+          echo "Packaged contents:"
+          unzip -l hls-video-downloader.zip
+
+      - name: Publish rolling "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.meta.outputs.version }}"
+
+          printf '%s\n' \
+            "Automated build of **HLS Video Downloader**." \
+            "" \
+            "- Version: \`$version\`" \
+            "- Commit: \`${{ github.sha }}\` on branch \`${{ github.ref_name }}\`" \
+            "- Built: ${{ github.event.head_commit.timestamp }}" \
+            "" \
+            "**Install (unpacked):** download \`hls-video-downloader.zip\`, unzip it," \
+            "then open \`chrome://extensions\`, enable Developer mode and choose" \
+            "**Load unpacked** on the unzipped folder." \
+            > RELEASE_NOTES.md
+
+          # Recreate the rolling tag at this commit so "latest" always points to
+          # the newest build (delete is a no-op on the very first run).
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest hls-video-downloader.zip \
+            --title "Latest build (v$version, ${{ steps.meta.outputs.short_sha }})" \
+            --notes-file RELEASE_NOTES.md \
+            --prerelease \
+            --target "$GITHUB_SHA"
