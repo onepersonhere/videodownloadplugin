@@ -1,0 +1,228 @@
+:root {
+  --bg: #ffffff;
+  --bg-soft: #f5f6fb;
+  --border: #e6e8f0;
+  --text: #1f2330;
+  --muted: #767c8f;
+  --accent: #5b6cf0;
+  --accent-d: #4858d8;
+  --accent-soft: #eef0fe;
+  --green: #1faa59;
+  --red: #d8453b;
+  --amber: #c98a16;
+  --radius: 10px;
+  --shadow: 0 1px 2px rgba(20, 24, 44, 0.06), 0 4px 16px rgba(20, 24, 44, 0.06);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  width: 390px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* ----- top bar ----- */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.logo { width: 28px; height: 28px; border-radius: 7px; }
+.titles { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
+.titles h1 { font-size: 14px; margin: 0; font-weight: 650; }
+.subtitle {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+
+/* ----- tabs ----- */
+.tabs { display: flex; gap: 4px; padding: 8px 10px 0; border-bottom: 1px solid var(--border); }
+.tab {
+  flex: 1;
+  border: none;
+  background: none;
+  padding: 8px 6px 10px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.pill {
+  display: inline-flex;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent-d);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* ----- panels ----- */
+main { max-height: 460px; min-height: 160px; overflow-y: auto; }
+.panel { display: none; padding: 10px; }
+.panel.active { display: block; }
+.list { display: flex; flex-direction: column; gap: 8px; }
+
+.empty { display: none; padding: 26px 18px; text-align: center; color: var(--muted); }
+.empty.show { display: block; }
+.empty p { margin: 0 0 6px; }
+.empty .hint { font-size: 11.5px; opacity: 0.85; }
+
+/* ----- media / job cards ----- */
+.card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.card-head { display: flex; align-items: center; gap: 10px; padding: 10px; }
+.badge {
+  flex: none;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  padding: 3px 6px;
+  border-radius: 6px;
+  color: #fff;
+}
+.badge.hls { background: var(--accent); }
+.badge.direct { background: #5a6273; }
+.card-main { flex: 1; min-width: 0; }
+.card-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-sub {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+button.btn {
+  flex: none;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  font-size: 12px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+button.btn:hover { background: var(--accent-d); border-color: var(--accent-d); }
+button.btn.ghost { background: #fff; color: var(--accent-d); }
+button.btn.ghost:hover { background: var(--accent-soft); }
+button.btn:disabled { opacity: 0.55; cursor: default; }
+button.icon-btn {
+  flex: none;
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 8px;
+  width: 30px;
+  height: 30px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+}
+button.icon-btn:hover { background: var(--bg-soft); color: var(--text); }
+.caret { transition: transform 0.15s ease; display: inline-block; }
+.caret.open { transform: rotate(180deg); }
+
+/* expandable quality area */
+.options { border-top: 1px solid var(--border); padding: 8px 10px; background: var(--bg-soft); }
+.opt-loading { color: var(--muted); padding: 4px 2px; }
+.opt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-bottom: 1px dashed var(--border);
+}
+.opt-row:last-child { border-bottom: none; }
+.opt-label { flex: 1; min-width: 0; }
+.opt-name { font-weight: 600; }
+.opt-meta { font-size: 11px; color: var(--muted); }
+.opt-section-title {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 8px 2px 2px;
+  font-weight: 700;
+}
+.notice {
+  font-size: 11px;
+  color: var(--amber);
+  background: #fff8e8;
+  border: 1px solid #f0e0b8;
+  padding: 5px 8px;
+  border-radius: 6px;
+  margin: 6px 2px 2px;
+}
+.notice.err { color: var(--red); background: #fdeceb; border-color: #f3c9c6; }
+
+/* ----- progress / jobs ----- */
+.progress {
+  height: 6px;
+  background: var(--bg-soft);
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 8px 10px 4px;
+  border: 1px solid var(--border);
+}
+.progress .bar { height: 100%; width: 0; background: var(--accent); transition: width 0.2s ease; }
+.progress.indeterminate .bar {
+  width: 40%;
+  background: linear-gradient(90deg, var(--accent-soft), var(--accent), var(--accent-soft));
+  animation: slide 1.1s linear infinite;
+}
+@keyframes slide { from { margin-left: -40%; } to { margin-left: 100%; } }
+.job-foot { display: flex; align-items: center; gap: 8px; padding: 4px 10px 10px; }
+.job-status { font-size: 11.5px; color: var(--muted); flex: 1; }
+.job-status.ok { color: var(--green); }
+.job-status.err { color: var(--red); }
+
+/* ----- footer ----- */
+.footer {
+  border-top: 1px solid var(--border);
+  padding: 6px 12px;
+  min-height: 24px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.panel-actions { display: flex; justify-content: flex-end; padding: 8px 2px 0; }
+.link-btn {
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.link-btn:hover { color: var(--text); }

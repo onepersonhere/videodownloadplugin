@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>HLS Downloader worker</title>
+  </head>
+  <body>
+    <!-- Hidden worker context. Heavy lifting (fetch + decrypt + mux) lives here
+         so it is not killed like the service worker can be, and so it has DOM
+         APIs (Blob URLs, Web Crypto, mux.js). -->
+    <script src="../lib/m3u8-parser.js"></script>
+    <script src="../lib/util.js"></script>
+    <script src="../lib/mux.min.js"></script>
+    <script src="offscreen.js"></script>
+  </body>
+</html>

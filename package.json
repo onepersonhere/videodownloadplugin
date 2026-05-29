@@ -1,0 +1,12 @@
+{
+  "name": "hls-video-downloader",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Manifest V3 Chrome extension that detects and downloads videos and HLS (.m3u8) streams, with quality selection, AES-128 decryption and TS->MP4 transmuxing.",
+  "scripts": {
+    "test": "node tests/parser.test.cjs",
+    "icons": "python3 scripts/make-icons.py",
+    "zip": "cd \"$(dirname \"$0\")\" 2>/dev/null; rm -f hls-video-downloader.zip && zip -r hls-video-downloader.zip manifest.json icons src -x '*.DS_Store'"
+  },
+  "license": "MIT"
+}

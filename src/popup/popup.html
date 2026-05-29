@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>HLS Video Downloader</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <img src="../../icons/icon32.png" alt="" class="logo" />
+      <div class="titles">
+        <h1>HLS Video Downloader</h1>
+        <span class="subtitle" id="page-host">—</span>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="media">
+        On this page <span class="pill" id="media-count">0</span>
+      </button>
+      <button class="tab" data-tab="downloads">
+        Downloads <span class="pill" id="jobs-count">0</span>
+      </button>
+    </nav>
+
+    <main>
+      <section id="panel-media" class="panel active">
+        <div id="media-list" class="list"></div>
+        <div id="media-empty" class="empty">
+          <p>No media detected yet.</p>
+          <p class="hint">
+            Start playing a video, then reopen this popup. HLS streams are picked
+            up from network traffic automatically.
+          </p>
+        </div>
+        <div class="panel-actions">
+          <button id="clear-media" class="link-btn">Clear list</button>
+        </div>
+      </section>
+
+      <section id="panel-downloads" class="panel">
+        <div id="jobs-list" class="list"></div>
+        <div id="jobs-empty" class="empty">
+          <p>No downloads yet.</p>
+        </div>
+        <div class="panel-actions">
+          <button id="clear-finished" class="link-btn">Clear finished</button>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span id="status-text"></span>
+    </footer>
+
+    <script src="../lib/m3u8-parser.js"></script>
+    <script src="../lib/util.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

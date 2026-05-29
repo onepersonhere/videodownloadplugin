@@ -1,0 +1,14 @@
+# build artifacts
+*.zip
+dist/
+
+# os / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# node (only used for the test runner; no deps committed)
+node_modules/
+npm-debug.log*
