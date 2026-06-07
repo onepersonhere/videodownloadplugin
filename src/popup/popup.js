@@ -9,6 +9,8 @@
 
 const U = self.VDUtil;
 const manifestCache = new Map(); // url -> parsed manifest
+const expandedUrls = new Set(); // media URLs whose quality dropdown is open
+let lastMediaSig = ''; // signature of the rendered media list (skip needless rebuilds)
 let activeTabId = null;
 let currentTitle = '';
 let pollTimer = null;
@@ -94,11 +96,14 @@ function sectionTitle(text) {
 
 async function buildVimeoOptions(item, optionsEl) {
   optionsEl.replaceChildren(el('div', { class: 'opt-loading', text: 'Loading stream info…' }));
-  let man;
+  let man = manifestCache.get(item.url);
   try {
-    const res = await fetch(item.url, { credentials: 'include' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    man = VimeoManifest.parse(await res.text(), item.url);
+    if (!man) {
+      const res = await fetch(item.url, { credentials: 'include' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      man = VimeoManifest.parse(await res.text(), item.url);
+      manifestCache.set(item.url, man);
+    }
   } catch (e) {
     optionsEl.replaceChildren(
       noticeNode('Could not read this Vimeo stream (' + e.message + ').', true),
@@ -214,14 +219,19 @@ function mediaCard(item) {
   if (item.mime) subParts.push(item.mime);
   if (item.fromPage) subParts.push('in page');
 
+  const startOpen = isStream && expandedUrls.has(item.url);
   const optionsEl = el('div', { class: 'options' });
-  optionsEl.style.display = 'none';
+  optionsEl.style.display = startOpen ? 'block' : 'none';
   let built = false;
 
-  const caret = el('span', { class: 'caret', text: '▾' });
+  const caret = el('span', { class: 'caret' + (startOpen ? ' open' : ''), text: '▾' });
   const expandBtn = isStream
     ? el('button', { class: 'icon-btn', title: 'Choose quality' }, [caret])
     : null;
+  if (startOpen) {
+    built = true;
+    buildOptions(item, optionsEl);
+  }
 
   const quickBtn = el('button', {
     class: 'btn',
@@ -242,6 +252,8 @@ function mediaCard(item) {
       const open = optionsEl.style.display === 'none';
       optionsEl.style.display = open ? 'block' : 'none';
       caret.classList.toggle('open', open);
+      if (open) expandedUrls.add(item.url);
+      else expandedUrls.delete(item.url);
       if (open && !built) {
         built = true;
         buildOptions(item, optionsEl);
@@ -269,12 +281,18 @@ function renderMedia(bucket) {
   const rank = (k) => (k === 'direct' ? 1 : 0);
   items.sort((a, b) => (rank(a.kind) === rank(b.kind) ? b.ts - a.ts : rank(a.kind) - rank(b.kind)));
 
-  list.replaceChildren(...items.map(mediaCard));
+  // Cheap, state-preserving updates run every poll.
   $('#media-count').textContent = String(items.length);
   $('#media-empty').classList.toggle('show', items.length === 0);
-
   const host = bucket && bucket.pageUrl ? hostOf(bucket.pageUrl) : '';
   if (host) $('#page-host').textContent = host;
+
+  // Only rebuild the cards (which would collapse any open dropdown) when the
+  // set of detected media actually changes.
+  const sig = items.map((i) => i.kind + ':' + i.url).join('|');
+  if (sig === lastMediaSig) return;
+  lastMediaSig = sig;
+  list.replaceChildren(...items.map(mediaCard));
 }
 
 /* ---------- jobs rendering ---------- */
