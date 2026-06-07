@@ -28,6 +28,9 @@ into a single playable file.
   `.mp4` using [mux.js](https://github.com/videojs/mux.js); fragmented‑MP4
   (fMP4) streams are assembled natively. Falls back to raw `.ts` if transmuxing
   fails.
+- **Seekable output** — every MP4 is remuxed to a *progressive* file with a
+  proper duration and sample index, so you can scrub the timeline and change
+  playback speed (fragmented MP4 output can't be scrubbed in most players).
 - **Byte‑range, discontinuity and fMP4 init‑segment support.**
 - **Vimeo adaptive support** — recognises Vimeo's custom `master.json` /
   `playlist.json` manifest (the `vimeocdn.com` adaptive CDN), lets you pick a
@@ -97,9 +100,12 @@ Requires Chrome 116+ (uses the offscreen documents and `chrome.runtime.getContex
 - **`src/lib/m3u8-parser.js`** — dependency‑free HLS parser (master + media
   playlists, keys, maps, byte‑ranges).
 - **`src/lib/vimeo-parser.js`** — parser for Vimeo's adaptive JSON manifest.
-- **`src/lib/fmp4-muxer.js`** — tiny dependency‑free fragmented‑MP4 muxer that
-  combines a video‑only and an audio‑only fMP4 into one 2‑track MP4 (used for
-  Vimeo, where audio and video are always separate).
+- **`src/lib/fmp4-muxer.js`** — tiny dependency‑free fMP4 → **progressive** MP4
+  remuxer. It demuxes one or more fragmented MP4 buffers and rebuilds a single
+  `moov` with full sample tables, so the result has a real duration and a
+  seek index. It's the final stage for every MP4 the extension produces
+  (Vimeo's separate video+audio, HLS fMP4, and HLS‑TS via mux.js) — without it,
+  the output is a fragmented MP4 that can't be scrubbed or speed‑adjusted.
 - **`src/lib/mux.min.js`** — vendored [mux.js](https://github.com/videojs/mux.js)
   6.3.0 (Apache‑2.0) for MPEG‑TS → MP4.
 

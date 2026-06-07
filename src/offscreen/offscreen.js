@@ -114,6 +114,17 @@ function base64ToUint8(b64) {
   return out;
 }
 
+// Remux fragmented MP4 bytes to a seekable progressive MP4; return the original
+// bytes if remuxing fails (still playable, just not scrubbable).
+function toProgressive(fragmented, jobId) {
+  try {
+    return FMP4Muxer.remux([fragmented]);
+  } catch (e) {
+    post({ cmd: 'log', jobId, message: 'remux to progressive failed, keeping fragmented MP4: ' + e.message });
+    return fragmented;
+  }
+}
+
 // "start-end" byte range -> { offset, length } for a Range header.
 function parseRange(range) {
   const m = /(\d+)-(\d+)/.exec(range);
@@ -195,22 +206,27 @@ async function runVimeo(job) {
         const merged = FMP4Muxer.mux(videoBuf, audioBuf);
         post({ cmd: 'ready', jobId, outputs: [{ objectUrl: makeUrl(merged, 'video/mp4'), filename: ensureExt(base, 'mp4'), size: merged.length }] });
       } catch (e) {
-        // Robust fallback: deliver both tracks as separate, always-valid files.
-        post({ cmd: 'log', jobId, message: 'mux failed, saving separate files: ' + e.message });
+        // Robust fallback: deliver both tracks as separate (still remuxed to
+        // progressive so each is individually seekable).
+        post({ cmd: 'log', jobId, message: 'combined mux failed, saving separate files: ' + e.message });
+        const v = toProgressive(videoBuf, jobId);
+        const a = toProgressive(audioBuf, jobId);
         post({
           cmd: 'ready',
           jobId,
-          note: 'Muxing failed — saved video and audio as separate files.',
+          note: 'saved video and audio separately',
           outputs: [
-            { objectUrl: makeUrl(videoBuf, 'video/mp4'), filename: ensureExt(base + ' (video)', 'mp4'), size: videoBuf.length },
-            { objectUrl: makeUrl(audioBuf, 'audio/mp4'), filename: ensureExt(base + ' (audio)', 'm4a'), size: audioBuf.length },
+            { objectUrl: makeUrl(v, 'video/mp4'), filename: ensureExt(base + ' (video)', 'mp4'), size: v.length },
+            { objectUrl: makeUrl(a, 'audio/mp4'), filename: ensureExt(base + ' (audio)', 'm4a'), size: a.length },
           ],
         });
       }
     } else if (videoBuf) {
-      post({ cmd: 'ready', jobId, outputs: [{ objectUrl: makeUrl(videoBuf, 'video/mp4'), filename: ensureExt(base, 'mp4'), size: videoBuf.length }] });
+      const v = toProgressive(videoBuf, jobId);
+      post({ cmd: 'ready', jobId, outputs: [{ objectUrl: makeUrl(v, 'video/mp4'), filename: ensureExt(base, 'mp4'), size: v.length }] });
     } else {
-      post({ cmd: 'ready', jobId, outputs: [{ objectUrl: makeUrl(audioBuf, 'audio/mp4'), filename: ensureExt(base, 'm4a'), size: audioBuf.length }] });
+      const a = toProgressive(audioBuf, jobId);
+      post({ cmd: 'ready', jobId, outputs: [{ objectUrl: makeUrl(a, 'audio/mp4'), filename: ensureExt(base, 'm4a'), size: a.length }] });
     }
   } catch (e) {
     if (String(e && e.message) === 'canceled') return;
@@ -328,15 +344,18 @@ async function runHls(job) {
     let blob;
     let ext;
     if (isFmp4) {
+      // Concatenate init + segments into a fragmented MP4, then remux to a
+      // progressive (seekable) MP4. Fall back to the fragmented bytes if remux
+      // fails — it still plays, just isn't scrubbable.
       const parts = [];
       if (initData) parts.push(new Uint8Array(initData));
       for (const u of results) parts.push(u);
-      blob = new Blob(parts, { type: 'video/mp4' });
+      blob = new Blob([toProgressive(concatU8(parts), jobId)], { type: 'video/mp4' });
       ext = 'mp4';
     } else if (job.mux !== false && typeof muxjs !== 'undefined') {
       try {
-        const mp4 = transmuxTsToMp4(results);
-        blob = new Blob([mp4], { type: 'video/mp4' });
+        const fragmented = transmuxTsToMp4(results); // mux.js emits a fragmented MP4
+        blob = new Blob([toProgressive(fragmented, jobId)], { type: 'video/mp4' });
         ext = 'mp4';
       } catch (e) {
         post({ cmd: 'log', jobId, message: 'TS->MP4 transmux failed, saving raw .ts: ' + e.message });
