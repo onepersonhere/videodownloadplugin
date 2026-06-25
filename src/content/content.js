@@ -79,4 +79,20 @@
   document.addEventListener('DOMContentLoaded', sendPageInfo);
   window.addEventListener('load', () => { sendPageInfo(); scan(); });
   setTimeout(sendPageInfo, 2500);
+
+  // Answer the crawler: return the links on this page (for "scan linked pages").
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (!msg || msg.cmd !== 'getLinks') return;
+    const out = [];
+    const seen = new Set();
+    document.querySelectorAll('a[href]').forEach((a) => {
+      const href = a.href;
+      if (!href || seen.has(href)) return;
+      seen.add(href);
+      const text = (a.textContent || a.getAttribute('aria-label') || a.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+      out.push({ url: href, text: text.slice(0, 140) });
+    });
+    sendResponse({ links: out, title: document.title || '', url: location.href });
+    return true;
+  });
 })();

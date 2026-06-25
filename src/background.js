@@ -17,10 +17,15 @@ const SESSION = chrome.storage.session;
 const state = { media: {}, jobs: {} };
 
 // Resolves once we've rehydrated state after a service-worker restart.
-const ready = SESSION.get(['media', 'jobs'])
+const ready = SESSION.get(['media', 'jobs', 'crawl'])
   .then((s) => {
     state.media = s.media || {};
     state.jobs = s.jobs || {};
+    // A crawl left "scanning" means the previous worker died mid-scan; mark it
+    // stopped so the popup isn't stuck and a new scan can be started.
+    if (s.crawl && s.crawl.status === 'scanning') {
+      SESSION.set({ crawl: Object.assign({}, s.crawl, { status: 'canceled' }) }).catch(() => {});
+    }
   })
   .catch(() => {});
 
@@ -315,14 +320,149 @@ chrome.downloads.onChanged.addListener((delta) => {
       const allDone = multi
         ? job.downloads.length >= (job.expectedOutputs || 1) && job.downloads.every((d) => d.done)
         : true;
-      if (allDone) setJob(job.jobId, { status: 'saved', phase: 'done', progress: 1 });
+      if (allDone) { setJob(job.jobId, { status: 'saved', phase: 'done', progress: 1 }); pumpDownloads(); }
       else persist();
     } else if (cur === 'interrupted') {
       setJob(job.jobId, { status: 'error', message: (delta.error && delta.error.current) || 'interrupted' });
       sendToOffscreen({ cmd: 'revoke', url: dl ? dl.objectUrl : job.objectUrl });
+      pumpDownloads();
     }
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * Download queue (used by "Download all" from a site scan)
+ * ------------------------------------------------------------------ */
+
+const MAX_CONCURRENT_DOWNLOADS = 3;
+const downloadQueue = [];
+let startingDownloads = 0;
+
+function activeDownloadCount() {
+  return Object.values(state.jobs).filter((j) => ['starting', 'downloading', 'saving'].includes(j.status)).length;
+}
+function pumpDownloads() {
+  while (downloadQueue.length && activeDownloadCount() + startingDownloads < MAX_CONCURRENT_DOWNLOADS) {
+    const job = downloadQueue.shift();
+    startingDownloads++;
+    startDownload(job).catch(() => {}).finally(() => { startingDownloads--; pumpDownloads(); });
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Site crawl: open linked pages in a hidden tab and harvest videos
+ * ------------------------------------------------------------------ */
+
+let crawl = null; // { status, total, scanned, found, results:[], canceled }
+function saveCrawl() {
+  return chrome.storage.session.set({ crawl }).catch(() => {});
+}
+
+const SKIP_LINK_EXT = /\.(jpg|jpeg|png|gif|webp|svg|css|js|mjs|json|pdf|zip|rar|ico|woff2?|ttf|eot|mp3|xml|rss)(\?|#|$)/i;
+function stripHashUrl(u) {
+  try { const x = new URL(u); x.hash = ''; return x.href; } catch (e) { return u; }
+}
+function filterPages(links, activeUrl) {
+  let origin = null;
+  try { origin = new URL(activeUrl).origin; } catch (e) { /* ignore */ }
+  const current = stripHashUrl(activeUrl);
+  const seen = new Set();
+  const out = [];
+  for (const ln of links || []) {
+    let u;
+    try { u = new URL(ln.url); } catch (e) { continue; }
+    if (!/^https?:$/.test(u.protocol)) continue;
+    if (origin && u.origin !== origin) continue;
+    if (SKIP_LINK_EXT.test(u.pathname)) continue;
+    u.hash = '';
+    const key = u.href;
+    if (key === current || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ url: key, text: (ln.text || '').trim().slice(0, 120) });
+    if (out.length >= 80) break;
+  }
+  return out;
+}
+
+function delayMs(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+function navigateTab(tabId, url, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpd);
+      resolve(ok);
+    };
+    const onUpd = (id, info) => { if (id === tabId && info.status === 'complete') finish(true); };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    chrome.tabs.onUpdated.addListener(onUpd);
+    chrome.tabs.update(tabId, { url }).catch(() => finish(false));
+  });
+}
+
+async function waitForVideo(tabId, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (crawl && crawl.canceled) return null;
+    const bucket = state.media[tabId];
+    if (bucket) {
+      const items = Object.values(bucket.items);
+      const pick =
+        items.find((i) => i.kind === 'vimeo') ||
+        items.find((i) => i.kind === 'hls') ||
+        items.find((i) => i.kind === 'direct');
+      if (pick) return pick;
+    }
+    await delayMs(500);
+  }
+  return null;
+}
+
+async function scanOnePage(tabId, page) {
+  await navigateTab(tabId, page.url, 25000);
+  const item = await waitForVideo(tabId, 13000);
+  let title = page.text || page.url;
+  try { const t = await chrome.tabs.get(tabId); if (t && t.title) title = t.title; } catch (e) { /* ignore */ }
+  if (!item) return null;
+  return { title, pageUrl: page.url, kind: item.kind, url: item.url };
+}
+
+async function runCrawl(activeTab) {
+  let links = null;
+  try {
+    const resp = await chrome.tabs.sendMessage(activeTab.id, { cmd: 'getLinks' });
+    links = resp && resp.links;
+  } catch (e) { /* content script unavailable on this page */ }
+  const pages = filterPages(links, activeTab.url || '');
+  crawl = { status: 'scanning', total: pages.length, scanned: 0, found: 0, results: [], canceled: false };
+  await saveCrawl();
+  if (!pages.length) { crawl.status = 'done'; await saveCrawl(); return; }
+
+  let tab;
+  try {
+    tab = await chrome.tabs.create({ url: 'about:blank', active: false, windowId: activeTab.windowId });
+  } catch (e) {
+    crawl.status = 'error';
+    crawl.error = String((e && e.message) || e);
+    await saveCrawl();
+    return;
+  }
+
+  for (const page of pages) {
+    if (crawl.canceled) break;
+    let found = null;
+    try { found = await scanOnePage(tab.id, page); } catch (e) { /* skip page */ }
+    if (found) { crawl.results.push(found); crawl.found = crawl.results.length; }
+    crawl.scanned++;
+    await saveCrawl();
+  }
+  try { await chrome.tabs.remove(tab.id); } catch (e) { /* ignore */ }
+  crawl.status = crawl.canceled ? 'canceled' : 'done';
+  await saveCrawl();
+}
 
 /* ------------------------------------------------------------------ *
  * Messaging
@@ -391,6 +531,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.cmd === 'error') {
     setJob(msg.jobId, { status: 'error', message: msg.message || 'download failed' });
+    pumpDownloads();
     return false;
   }
 
@@ -400,6 +541,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch((e) => sendResponse({ ok: false, error: String(e && e.message || e) }));
     return true; // async response
   }
+  if (msg.cmd === 'startCrawl') {
+    ready.then(async () => {
+      if (crawl && crawl.status === 'scanning') return sendResponse({ ok: false, error: 'already scanning' });
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab) return sendResponse({ ok: false, error: 'no active tab' });
+      runCrawl(tab); // runs in the background; progress is written to storage.session
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+  if (msg.cmd === 'cancelCrawl') {
+    if (crawl) crawl.canceled = true;
+    sendResponse({ ok: true });
+    return true;
+  }
+  if (msg.cmd === 'clearCrawl') {
+    crawl = null;
+    chrome.storage.session.remove('crawl').catch(() => {});
+    sendResponse({ ok: true });
+    return true;
+  }
+  if (msg.cmd === 'downloadCrawl') {
+    ready.then(() => {
+      const jobs = msg.jobs || [];
+      downloadQueue.push.apply(downloadQueue, jobs);
+      pumpDownloads();
+      sendResponse({ ok: true, queued: jobs.length });
+    });
+    return true;
+  }
   if (msg.cmd === 'cancelJob') {
     ready.then(() => {
       const job = state.jobs[msg.jobId];
@@ -408,6 +579,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (job.downloadId != null) chrome.downloads.cancel(job.downloadId).catch(() => {});
       (job.downloads || []).forEach((d) => chrome.downloads.cancel(d.downloadId).catch(() => {}));
       setJob(msg.jobId, { status: 'canceled', phase: 'canceled' });
+      pumpDownloads();
       sendResponse({ ok: true });
     });
     return true;

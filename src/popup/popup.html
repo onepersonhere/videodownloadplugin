@@ -17,7 +17,10 @@
 
     <nav class="tabs">
       <button class="tab active" data-tab="media">
-        On this page <span class="pill" id="media-count">0</span>
+        This page <span class="pill" id="media-count">0</span>
+      </button>
+      <button class="tab" data-tab="site">
+        Scan site <span class="pill" id="site-count">0</span>
       </button>
       <button class="tab" data-tab="downloads">
         Downloads <span class="pill" id="jobs-count">0</span>
@@ -36,6 +39,23 @@
         </div>
         <div class="panel-actions">
           <button id="clear-media" class="link-btn">Clear list</button>
+        </div>
+      </section>
+
+      <section id="panel-site" class="panel">
+        <div class="scan-head">
+          <button id="scan-start" class="btn">Scan linked pages</button>
+          <button id="scan-cancel" class="btn ghost" hidden>Stop</button>
+          <button id="scan-download" class="btn" hidden>Download all</button>
+        </div>
+        <div id="scan-status" class="scan-status"></div>
+        <div id="scan-list" class="list"></div>
+        <p class="hint scan-hint">
+          Visits each page linked from the current page in a temporary background
+          tab to detect its video. Keep this popup open while it scans.
+        </p>
+        <div class="panel-actions">
+          <button id="scan-clear" class="link-btn" hidden>Clear results</button>
         </div>
       </section>
 

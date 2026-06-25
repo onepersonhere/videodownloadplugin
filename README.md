@@ -41,6 +41,9 @@ into a single playable file.
   traffic or referenced by `<video>` / `<source>` tags.
 - **Live progress** — per‑download progress, with cancel, in a Downloads tab.
   Downloads keep running even if you close the popup.
+- **Scan a site (batch download)** — visits each page linked from the current
+  page in a temporary background tab, detects the video on each, shows you the
+  list of titles, and downloads them all (max 3 at a time).
 
 ---
 
@@ -63,6 +66,23 @@ Requires Chrome 116+ (uses the offscreen documents and `chrome.runtime.getContex
    **▾** caret to expand and choose a specific resolution / audio track.
 4. Watch progress in the **Downloads** tab. The finished file lands in your
    browser's download folder.
+
+### Scan a whole site
+
+To grab every video across a set of pages (e.g. all lessons of a course):
+
+1. Open a page that **links to** the videos you want (a course index, a
+   playlist page…).
+2. Open the popup → **Scan site** tab → **Scan linked pages**.
+3. A temporary background tab visits each same‑site link, lets its player load,
+   and detects the video. Found titles appear in the list as it goes. **Keep
+   the popup open while it scans.**
+4. Click **Download all** — the videos queue up and download (3 at a time) in
+   the Downloads tab.
+
+Notes: it follows the links on the current page only (one level), same site.
+Detection depends on each page's player actually loading its video, and Vimeo's
+signed URLs are short‑lived, so start the downloads soon after scanning.
 
 ---
 

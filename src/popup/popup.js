@@ -48,8 +48,8 @@ function baseName(item) {
 
 /* ---------- state ---------- */
 async function loadState() {
-  const { media = {}, jobs = {} } = await chrome.storage.session.get(['media', 'jobs']);
-  return { media, jobs };
+  const { media = {}, jobs = {}, crawl = null } = await chrome.storage.session.get(['media', 'jobs', 'crawl']);
+  return { media, jobs, crawl };
 }
 
 async function startJob(job) {
@@ -351,18 +351,61 @@ function renderJobs(jobs) {
   $('#jobs-empty').classList.toggle('show', arr.length === 0);
 }
 
+/* ---------- site scan ---------- */
+function resultToJob(r) {
+  const base = U.deriveBaseName(r.title, r.url);
+  if (r.kind === 'vimeo') return { kind: 'vimeo', url: r.url, filename: base, title: r.title };
+  if (r.kind === 'hls') return { kind: 'hls', url: r.url, filename: base, title: r.title, mux: true };
+  return { kind: 'direct', url: r.url, filename: base, title: r.title };
+}
+
+function scanCard(r) {
+  return el('div', { class: 'card' }, [
+    el('div', { class: 'card-head' }, [
+      el('span', { class: 'badge ' + (r.kind === 'direct' ? 'direct' : 'hls'), text: r.kind === 'vimeo' ? 'VIMEO' : r.kind === 'hls' ? 'HLS' : 'FILE' }),
+      el('div', { class: 'card-main' }, [
+        el('div', { class: 'card-title', title: r.pageUrl, text: r.title || r.url }),
+        el('div', { class: 'card-sub', text: hostOf(r.pageUrl) }),
+      ]),
+    ]),
+  ]);
+}
+
+function renderScan(crawl) {
+  const c = crawl || { status: 'idle', results: [] };
+  const results = c.results || [];
+  const scanning = c.status === 'scanning';
+  $('#site-count').textContent = String(results.length);
+  $('#scan-start').hidden = scanning;
+  $('#scan-cancel').hidden = !scanning;
+  $('#scan-download').hidden = results.length === 0;
+  $('#scan-download').textContent = results.length ? `Download all (${results.length})` : 'Download all';
+  $('#scan-clear').hidden = scanning || !c.status || c.status === 'idle';
+
+  let s = '';
+  if (scanning) s = `Scanning ${c.scanned}/${c.total}… found ${c.found || 0}`;
+  else if (c.status === 'done') s = `Done — scanned ${c.scanned}/${c.total}, found ${results.length} video(s)`;
+  else if (c.status === 'canceled') s = `Stopped — found ${results.length} so far`;
+  else if (c.status === 'error') s = `Error: ${c.error || 'scan failed'}`;
+  $('#scan-status').textContent = s;
+
+  $('#scan-list').replaceChildren(...results.map(scanCard));
+}
+
 /* ---------- tabs ---------- */
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
   $('#panel-media').classList.toggle('active', name === 'media');
+  $('#panel-site').classList.toggle('active', name === 'site');
   $('#panel-downloads').classList.toggle('active', name === 'downloads');
 }
 
 /* ---------- refresh loop ---------- */
 async function refresh() {
-  const { media, jobs } = await loadState();
+  const { media, jobs, crawl } = await loadState();
   renderMedia(media[activeTabId]);
   renderJobs(jobs);
+  renderScan(crawl);
 }
 
 async function init() {
@@ -383,9 +426,28 @@ async function init() {
     refresh();
   });
 
+  // Site scan controls.
+  $('#scan-start').addEventListener('click', async () => {
+    const res = await chrome.runtime.sendMessage({ cmd: 'startCrawl' });
+    if (res && !res.ok) setStatus('Scan: ' + (res.error || 'could not start'));
+    refresh();
+  });
+  $('#scan-cancel').addEventListener('click', () => chrome.runtime.sendMessage({ cmd: 'cancelCrawl' }));
+  $('#scan-clear').addEventListener('click', async () => {
+    await chrome.runtime.sendMessage({ cmd: 'clearCrawl' });
+    refresh();
+  });
+  $('#scan-download').addEventListener('click', async () => {
+    const { crawl } = await loadState();
+    const jobs = ((crawl && crawl.results) || []).map(resultToJob);
+    if (!jobs.length) return;
+    await chrome.runtime.sendMessage({ cmd: 'downloadCrawl', jobs });
+    switchTab('downloads');
+  });
+
   // Live updates: storage events + a slow poll as a safety net.
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'session' && (changes.media || changes.jobs)) refresh();
+    if (area === 'session' && (changes.media || changes.jobs || changes.crawl)) refresh();
   });
   pollTimer = setInterval(refresh, 800);
   window.addEventListener('unload', () => clearInterval(pollTimer));
