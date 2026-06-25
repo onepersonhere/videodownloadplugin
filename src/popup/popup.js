@@ -13,6 +13,7 @@ const expandedUrls = new Set(); // media URLs whose quality dropdown is open
 let lastMediaSig = ''; // signature of the rendered media list (skip needless rebuilds)
 let activeTabId = null;
 let currentTitle = '';
+let currentPageUrl = '';
 let pollTimer = null;
 
 /* ---------- tiny DOM helpers ---------- */
@@ -43,7 +44,9 @@ function hostOf(url) {
 }
 
 function baseName(item) {
-  return U.deriveBaseName(currentTitle, item.url);
+  // Prefer the page title; fall back to the page URL rather than the (hashy)
+  // manifest/segment URL so filenames never become a random hash.
+  return U.deriveBaseName(currentTitle, currentPageUrl || item.url);
 }
 
 /* ---------- state ---------- */
@@ -353,7 +356,8 @@ function renderJobs(jobs) {
 
 /* ---------- site scan ---------- */
 function resultToJob(r) {
-  const base = U.deriveBaseName(r.title, r.url);
+  // Name by the page title; fall back to the page URL (never the hashy manifest URL).
+  const base = U.deriveBaseName(r.title, r.pageUrl || r.url);
   if (r.kind === 'vimeo') return { kind: 'vimeo', url: r.url, filename: base, title: r.title };
   if (r.kind === 'hls') return { kind: 'hls', url: r.url, filename: base, title: r.title, mux: true };
   return { kind: 'direct', url: r.url, filename: base, title: r.title };
@@ -383,8 +387,10 @@ function renderScan(crawl) {
   $('#scan-clear').hidden = scanning || !c.status || c.status === 'idle';
 
   let s = '';
-  if (scanning) s = `Scanning ${c.scanned}/${c.total}… found ${c.found || 0}`;
-  else if (c.status === 'done') s = `Done — scanned ${c.scanned}/${c.total}, found ${results.length} video(s)`;
+  if (scanning) {
+    if (c.phase === 'Resolving videos') s = `Resolving ${c.scanned}/${c.total}… ${results.length} ready`;
+    else s = `Scanning ${c.scanned} page(s)… ${c.found || 0} video(s) found`;
+  } else if (c.status === 'done') s = `Done — ${results.length} video(s) found`;
   else if (c.status === 'canceled') s = `Stopped — found ${results.length} so far`;
   else if (c.status === 'error') s = `Error: ${c.error || 'scan failed'}`;
   $('#scan-status').textContent = s;
@@ -413,6 +419,7 @@ async function init() {
   if (tab) {
     activeTabId = tab.id;
     currentTitle = tab.title || '';
+    currentPageUrl = tab.url || '';
     $('#page-host').textContent = hostOf(tab.url || '') || '—';
   }
 

@@ -386,6 +386,89 @@ function filterPages(links, activeUrl) {
 
 function delayMs(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
+// Crawl tuning.
+const MAX_PAGES = 120;     // max pages whose HTML we fetch
+const MAX_DEPTH = 6;       // BFS depth from the start page
+const HTML_CONCURRENCY = 6;
+const NAV_WAIT_MS = 14000;
+const VIDEO_WAIT_MS = 9000;
+
+/* ---- HTML parsing (regex; service workers have no DOMParser) ---- */
+function decodeEntities(s) {
+  return String(s)
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#0*39;|&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n)).replace(/&nbsp;/g, ' ');
+}
+function extractTitle(html) {
+  const m = /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)/i.exec(html) ||
+    /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+  return m ? decodeEntities(m[1]).replace(/\s+/g, ' ').trim().slice(0, 140) : '';
+}
+function extractLinks(html, base) {
+  const out = new Set();
+  const re = /<a\b[^>]*?\bhref\s*=\s*["']([^"'#\s]+)/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    try { out.add(new URL(m[1], base).href); } catch (e) { /* ignore */ }
+    if (out.size > 500) break;
+  }
+  return [...out];
+}
+function extractVimeo(html) {
+  const m = /player\.vimeo\.com\/video\/(\d+)(?:\/([0-9a-f]{6,}))?/i.exec(html) ||
+    /vimeo\.com\/(\d+)(?:\/([0-9a-f]{6,}))?/i.exec(html);
+  if (!m) return null;
+  let hash = m[2] || null;
+  if (!hash) { const h = /[?&]h=([0-9a-f]{6,})/i.exec(html); if (h) hash = h[1]; }
+  return { id: m[1], hash };
+}
+function matchUrl(html, base, re) {
+  const m = re.exec(html);
+  if (!m) return null;
+  try { return new URL(m[0].replace(/\\\//g, '/'), base).href; } catch (e) { return null; }
+}
+function videoSignal(html, base) {
+  const manifest =
+    matchUrl(html, base, /https?:\\?\/\\?\/[^\s"'<>]+?\.m3u8(\?[^\s"'<>]*)?/i) ||
+    matchUrl(html, base, /https?:[^\s"'<>]+?\/(?:master|playlist)\.json[^\s"'<>]*/i);
+  const vimeo = extractVimeo(html);
+  const media = matchUrl(html, base, /https?:\\?\/\\?\/[^\s"'<>]+?\.(mp4|webm|m4v)(\?[^\s"'<>]*)?/i);
+  return { has: !!(manifest || vimeo || media || /<video[\s>]/i.test(html)), manifest, vimeo, media };
+}
+
+async function fetchHtml(url) {
+  try {
+    const res = await fetch(url, { credentials: 'include', redirect: 'follow' });
+    if (!res.ok) return '';
+    const ct = res.headers.get('content-type') || '';
+    if (ct && !/text\/html|application\/xhtml|application\/xml/i.test(ct)) return '';
+    return (await res.text()).slice(0, 1500000);
+  } catch (e) {
+    return '';
+  }
+}
+
+// Resolve a Vimeo video id (+ optional unlisted hash) to a downloadable URL via
+// the player config endpoint — no tab needed when this succeeds.
+async function resolveVimeoConfig(id, hash) {
+  try {
+    const url = `https://player.vimeo.com/video/${id}/config` + (hash ? `?h=${hash}` : '');
+    const res = await fetch(url, { credentials: 'omit' });
+    if (!res.ok) return null;
+    const f = ((await res.json()).request || {}).files || {};
+    if (f.dash && f.dash.cdns) { const c = f.dash.cdns[f.dash.default_cdn]; if (c && c.url) return { kind: 'vimeo', url: c.url }; }
+    if (f.hls && f.hls.cdns) { const c = f.hls.cdns[f.hls.default_cdn]; if (c && c.url) return { kind: 'hls', url: c.url }; }
+    if (Array.isArray(f.progressive) && f.progressive.length) {
+      const b = f.progressive.slice().sort((x, y) => (y.width || 0) - (x.width || 0))[0];
+      if (b && b.url) return { kind: 'direct', url: b.url };
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
 function navigateTab(tabId, url, timeoutMs) {
   return new Promise((resolve) => {
     let done = false;
@@ -410,57 +493,141 @@ async function waitForVideo(tabId, timeoutMs) {
     const bucket = state.media[tabId];
     if (bucket) {
       const items = Object.values(bucket.items);
-      const pick =
-        items.find((i) => i.kind === 'vimeo') ||
-        items.find((i) => i.kind === 'hls') ||
-        items.find((i) => i.kind === 'direct');
+      const pick = items.find((i) => i.kind === 'vimeo') || items.find((i) => i.kind === 'hls') || items.find((i) => i.kind === 'direct');
       if (pick) return pick;
     }
-    await delayMs(500);
+    await delayMs(250);
   }
   return null;
 }
 
-async function scanOnePage(tabId, page) {
-  await navigateTab(tabId, page.url, 25000);
-  const item = await waitForVideo(tabId, 13000);
-  let title = page.text || page.url;
-  try { const t = await chrome.tabs.get(tabId); if (t && t.title) title = t.title; } catch (e) { /* ignore */ }
+function pickFromBucket(bucket) {
+  if (!bucket) return null;
+  const items = Object.values(bucket.items);
+  return items.find((i) => i.kind === 'vimeo') || items.find((i) => i.kind === 'hls') || items.find((i) => i.kind === 'direct') || null;
+}
+
+// Turn a discovered video page into a downloadable {kind,url,title,pageUrl}.
+// Tries cheap resolution first; only loads the page in an (active) tab when it
+// must — the player needs a visible tab to fetch its manifest.
+async function resolveVideoPage(vp, getScanTab) {
+  if (vp.resolved) return vp.resolved;
+  const sig = vp.sig || {};
+  if (sig.manifest) {
+    const kind = /\.m3u8(\?|$)/i.test(sig.manifest) ? 'hls' : 'vimeo';
+    return { kind, url: sig.manifest, title: vp.title, pageUrl: vp.url };
+  }
+  if (sig.vimeo) {
+    const r = await resolveVimeoConfig(sig.vimeo.id, sig.vimeo.hash);
+    if (r) return { kind: r.kind, url: r.url, title: vp.title, pageUrl: vp.url };
+  }
+  if (sig.media) return { kind: 'direct', url: sig.media, title: vp.title, pageUrl: vp.url };
+
+  const tabId = await getScanTab();
+  if (tabId == null) return null;
+  await navigateTab(tabId, vp.url, NAV_WAIT_MS);
+  const item = await waitForVideo(tabId, VIDEO_WAIT_MS);
   if (!item) return null;
-  return { title, pageUrl: page.url, kind: item.kind, url: item.url };
+  let title = vp.title;
+  try { const t = await chrome.tabs.get(tabId); if (t && t.title) title = t.title; } catch (e) { /* ignore */ }
+  return { kind: item.kind, url: item.url, title, pageUrl: vp.url };
 }
 
 async function runCrawl(activeTab) {
-  let links = null;
+  let seedLinks = null;
   try {
     const resp = await chrome.tabs.sendMessage(activeTab.id, { cmd: 'getLinks' });
-    links = resp && resp.links;
+    seedLinks = resp && resp.links;
   } catch (e) { /* content script unavailable on this page */ }
-  const pages = filterPages(links, activeTab.url || '');
-  crawl = { status: 'scanning', total: pages.length, scanned: 0, found: 0, results: [], canceled: false };
+
+  const seedUrl = stripHashUrl(activeTab.url || '');
+  let origin = '';
+  try { origin = new URL(seedUrl).origin; } catch (e) { /* ignore */ }
+
+  crawl = { status: 'scanning', phase: 'Finding videos', total: 0, scanned: 0, found: 0, results: [], canceled: false };
   await saveCrawl();
-  if (!pages.length) { crawl.status = 'done'; await saveCrawl(); return; }
 
-  let tab;
-  try {
-    tab = await chrome.tabs.create({ url: 'about:blank', active: false, windowId: activeTab.windowId });
-  } catch (e) {
-    crawl.status = 'error';
-    crawl.error = String((e && e.message) || e);
-    await saveCrawl();
-    return;
+  const visited = new Set([seedUrl]);
+  const videoSeen = new Set();
+  const videoPages = [];
+
+  // The start page is already loaded/active — use anything detected on it.
+  const seedItem = pickFromBucket(state.media[activeTab.id]);
+  if (seedItem) {
+    videoSeen.add(seedUrl);
+    videoPages.push({ url: seedUrl, title: activeTab.title || seedUrl, resolved: { kind: seedItem.kind, url: seedItem.url, title: activeTab.title || seedUrl, pageUrl: seedUrl } });
   }
 
-  for (const page of pages) {
+  // BFS, seeded from the start page's (rendered) links; a page only expands its
+  // own links if it contains a video.
+  let queue = filterPages(seedLinks, seedUrl).map((c) => ({ url: c.url, depth: 1, hint: c.text }));
+
+  while (queue.length && visited.size < MAX_PAGES && !crawl.canceled) {
+    const batch = [];
+    while (queue.length && batch.length < HTML_CONCURRENCY && visited.size < MAX_PAGES) {
+      const n = queue.shift();
+      const k = stripHashUrl(n.url);
+      if (visited.has(k)) continue;
+      visited.add(k);
+      batch.push(Object.assign(n, { url: k }));
+    }
+    crawl.total = visited.size;
+    await saveCrawl();
+
+    await Promise.all(batch.map(async (n) => {
+      if (crawl.canceled) return;
+      const html = await fetchHtml(n.url);
+      crawl.scanned++;
+      if (!html) return;
+      const sig = videoSignal(html, n.url);
+      if (!sig.has || videoSeen.has(n.url)) return;
+      videoSeen.add(n.url);
+      videoPages.push({ url: n.url, title: extractTitle(html) || n.hint || n.url, sig });
+      crawl.found = videoPages.length;
+      if (n.depth < MAX_DEPTH) {
+        for (const link of extractLinks(html, n.url)) {
+          const k = stripHashUrl(link);
+          if (visited.has(k) || SKIP_LINK_EXT.test(k)) continue;
+          try { if (new URL(k).origin !== origin) continue; } catch (e) { continue; }
+          queue.push({ url: k, depth: n.depth + 1 });
+        }
+      }
+    }));
+    await saveCrawl();
+  }
+
+  // Resolution: cheap paths first; lazily open ONE active tab for the rest.
+  crawl.phase = 'Resolving videos';
+  crawl.total = videoPages.length;
+  crawl.scanned = 0;
+  await saveCrawl();
+
+  let scanTabId = null;
+  const getScanTab = async () => {
+    if (scanTabId != null) return scanTabId;
+    try {
+      const t = await chrome.tabs.create({ url: 'about:blank', active: true, windowId: activeTab.windowId });
+      scanTabId = t.id;
+    } catch (e) { scanTabId = null; }
+    return scanTabId;
+  };
+
+  for (const vp of videoPages) {
     if (crawl.canceled) break;
-    let found = null;
-    try { found = await scanOnePage(tab.id, page); } catch (e) { /* skip page */ }
-    if (found) { crawl.results.push(found); crawl.found = crawl.results.length; }
+    let result = null;
+    try { result = await resolveVideoPage(vp, getScanTab); } catch (e) { /* skip */ }
+    if (result) crawl.results.push(result);
     crawl.scanned++;
+    crawl.found = crawl.results.length;
     await saveCrawl();
   }
-  try { await chrome.tabs.remove(tab.id); } catch (e) { /* ignore */ }
+
+  if (scanTabId != null) {
+    try { await chrome.tabs.update(activeTab.id, { active: true }); } catch (e) { /* ignore */ }
+    try { await chrome.tabs.remove(scanTabId); } catch (e) { /* ignore */ }
+  }
   crawl.status = crawl.canceled ? 'canceled' : 'done';
+  crawl.phase = '';
   await saveCrawl();
 }
 
