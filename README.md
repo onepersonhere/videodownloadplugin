@@ -42,9 +42,9 @@ into a single playable file.
 - **Live progress** — per‑download progress, with cancel, in a Downloads tab.
   Downloads keep running even if you close the popup.
 - **Scan a site (batch download)** — breadth‑first crawls same‑site pages from
-  the current one, only following links from pages that contain a video, shows
-  you the list of titles, and downloads them all (max 3 at a time), named after
-  each page's title.
+  the current one (you pick the depth), using your logged‑in session, lists each
+  video it finds with its title, and downloads them individually or all at once
+  (max 3 at a time), named after each page's title.
 
 ---
 
@@ -74,22 +74,22 @@ To grab every video across a set of pages (e.g. all lessons of a course):
 
 1. Open a page that **links to** the videos you want (a course index, a
    playlist page…).
-2. Open the popup → **Scan site** tab → **Scan linked pages**.
-3. It does a fast **breadth‑first crawl** of same‑site pages: it fetches each
-   page's HTML, looks for a video (Vimeo embed, `.m3u8`, `playlist.json`,
-   `<video>`…), and **only follows a page's links if that page has a video** —
-   so it spreads through the lessons without wandering the whole site. Found
-   titles appear in the list as it goes (the scan runs in the background, so the
-   popup doesn't need to stay open).
-4. Click **Download all** — the videos queue up and download (3 at a time) in
-   the Downloads tab, **named after each page's title**.
+2. Open the popup → **Scan site** tab, pick a **Depth** (how many link‑hops to
+   follow) and click **Scan**.
+3. It does a **breadth‑first crawl** of same‑site pages up to that depth,
+   fetching each page **through your logged‑in session** (the request is made
+   from the page itself, so your cookies are sent and member‑only pages work).
+   It shows the page it's currently searching, and each video it finds appears
+   in the list **with its title** as it goes (the scan runs in the background —
+   the popup doesn't need to stay open).
+4. Click **Download** on a single video, or **Download all** — they queue and
+   download (3 at a time) in the Downloads tab, **named after each page's title**.
 
-How it resolves each video: Vimeo videos are resolved straight from Vimeo's
-player config (no tab, fast). Direct `.m3u8`/`.mp4`/`playlist.json` links are
-used as‑is. Anything that can't be resolved that way is opened briefly in a
-**foreground** tab so its player loads and the video is detected (you'll see the
-tab flip through those pages). Vimeo's signed URLs are short‑lived, so start the
-downloads soon after scanning.
+How it resolves each video: Vimeo is resolved straight from Vimeo's player
+config (no tab, fast); direct `.m3u8`/`.mp4`/`playlist.json` links are used
+as‑is. Anything that can't be resolved that way is opened briefly in a
+**foreground** tab so its player loads and the video is detected. Vimeo's signed
+URLs are short‑lived, so start the downloads soon after scanning.
 
 ---
 

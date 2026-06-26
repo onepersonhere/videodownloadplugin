@@ -44,15 +44,27 @@
 
       <section id="panel-site" class="panel">
         <div class="scan-head">
-          <button id="scan-start" class="btn">Scan linked pages</button>
+          <label class="scan-depth" title="How many link-hops deep to crawl">
+            Depth
+            <select id="scan-depth">
+              <option value="1">1</option>
+              <option value="2" selected>2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+            </select>
+          </label>
+          <button id="scan-start" class="btn">Scan</button>
           <button id="scan-cancel" class="btn ghost" hidden>Stop</button>
           <button id="scan-download" class="btn" hidden>Download all</button>
         </div>
         <div id="scan-status" class="scan-status"></div>
+        <div id="scan-current" class="scan-current"></div>
         <div id="scan-list" class="list"></div>
         <p class="hint scan-hint">
-          Visits each page linked from the current page in a temporary background
-          tab to detect its video. Keep this popup open while it scans.
+          Crawls pages linked from this one (up to the chosen depth), using your
+          current login, and lists the videos it finds. Click a video to download
+          it, or <b>Download all</b>.
         </p>
         <div class="panel-actions">
           <button id="scan-clear" class="link-btn" hidden>Clear results</button>

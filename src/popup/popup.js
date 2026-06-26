@@ -371,6 +371,15 @@ function scanCard(r) {
         el('div', { class: 'card-title', title: r.pageUrl, text: r.title || r.url }),
         el('div', { class: 'card-sub', text: hostOf(r.pageUrl) }),
       ]),
+      el('button', {
+        class: 'btn',
+        text: 'Download',
+        onclick: async (ev) => {
+          ev.currentTarget.disabled = true;
+          await chrome.runtime.sendMessage({ cmd: 'downloadCrawl', jobs: [resultToJob(r)] });
+          setStatus('Queued: ' + (r.title || r.url));
+        },
+      }),
     ]),
   ]);
 }
@@ -387,13 +396,12 @@ function renderScan(crawl) {
   $('#scan-clear').hidden = scanning || !c.status || c.status === 'idle';
 
   let s = '';
-  if (scanning) {
-    if (c.phase === 'Resolving videos') s = `Resolving ${c.scanned}/${c.total}… ${results.length} ready`;
-    else s = `Scanning ${c.scanned} page(s)… ${c.found || 0} video(s) found`;
-  } else if (c.status === 'done') s = `Done — ${results.length} video(s) found`;
-  else if (c.status === 'canceled') s = `Stopped — found ${results.length} so far`;
+  if (scanning) s = `Scanned ${c.scanned} page(s) · ${results.length} video(s) found`;
+  else if (c.status === 'done') s = `Done — ${results.length} video(s) found`;
+  else if (c.status === 'canceled') s = `Stopped — ${results.length} found`;
   else if (c.status === 'error') s = `Error: ${c.error || 'scan failed'}`;
   $('#scan-status').textContent = s;
+  $('#scan-current').textContent = scanning && c.current ? (c.phase === 'Opening pages' ? 'Opening: ' : 'Searching: ') + c.current : '';
 
   $('#scan-list').replaceChildren(...results.map(scanCard));
 }
@@ -435,7 +443,8 @@ async function init() {
 
   // Site scan controls.
   $('#scan-start').addEventListener('click', async () => {
-    const res = await chrome.runtime.sendMessage({ cmd: 'startCrawl' });
+    const depth = parseInt($('#scan-depth').value, 10) || 2;
+    const res = await chrome.runtime.sendMessage({ cmd: 'startCrawl', depth });
     if (res && !res.ok) setStatus('Scan: ' + (res.error || 'could not start'));
     refresh();
   });

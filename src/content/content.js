@@ -82,17 +82,38 @@
 
   // Answer the crawler: return the links on this page (for "scan linked pages").
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (!msg || msg.cmd !== 'getLinks') return;
-    const out = [];
-    const seen = new Set();
-    document.querySelectorAll('a[href]').forEach((a) => {
-      const href = a.href;
-      if (!href || seen.has(href)) return;
-      seen.add(href);
-      const text = (a.textContent || a.getAttribute('aria-label') || a.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
-      out.push({ url: href, text: text.slice(0, 140) });
-    });
-    sendResponse({ links: out, title: document.title || '', url: location.href });
-    return true;
+    if (!msg) return;
+    if (msg.cmd === 'getLinks') {
+      const out = [];
+      const seen = new Set();
+      document.querySelectorAll('a[href]').forEach((a) => {
+        const href = a.href;
+        if (!href || seen.has(href)) return;
+        seen.add(href);
+        const text = (a.textContent || a.getAttribute('aria-label') || a.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+        out.push({ url: href, text: text.slice(0, 140) });
+      });
+      sendResponse({ links: out, title: document.title || '', url: location.href });
+      return true;
+    }
+    // Fetch another page's HTML from the page context, so the request carries
+    // the site's first-party cookies (the crawler can then see logged-in pages).
+    if (msg.cmd === 'fetchPage') {
+      (async () => {
+        try {
+          const res = await fetch(msg.url, { credentials: 'include', redirect: 'follow' });
+          const ct = res.headers.get('content-type') || '';
+          if (!res.ok || (ct && !/html|xml/i.test(ct))) {
+            sendResponse({ ok: false, status: res.status });
+            return;
+          }
+          const html = (await res.text()).slice(0, 1500000);
+          sendResponse({ ok: true, html, finalUrl: res.url || msg.url });
+        } catch (e) {
+          sendResponse({ ok: false, error: String((e && e.message) || e) });
+        }
+      })();
+      return true;
+    }
   });
 })();
