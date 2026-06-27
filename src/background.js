@@ -390,7 +390,7 @@ function delayMs(ms) { return new Promise((r) => setTimeout(r, ms)); }
 const MAX_PAGES = 200;     // hard cap on pages whose HTML we fetch
 const HTML_CONCURRENCY = 6;
 const NAV_WAIT_MS = 14000;
-const VIDEO_WAIT_MS = 9000;
+const VIDEO_WAIT_MS = 16000; // max wait per opened page (returns early on detect)
 
 /* ---- HTML parsing (regex; service workers have no DOMParser) ---- */
 function decodeEntities(s) {
@@ -415,11 +415,17 @@ function extractLinks(html, base) {
   return [...out];
 }
 function extractVimeo(html) {
-  const m = /player\.vimeo\.com\/video\/(\d+)(?:\/([0-9a-f]{6,}))?/i.exec(html) ||
-    /vimeo\.com\/(\d+)(?:\/([0-9a-f]{6,}))?/i.exec(html);
+  const m =
+    /player\.vimeo\.com\/video\/(\d{5,})(?:\/([0-9a-f]{6,}))?/i.exec(html) ||
+    /vimeo\.com\/(?:video\/)?(\d{5,})(?:\/([0-9a-f]{6,}))?/i.exec(html) ||
+    /data-vimeo-id=["'](\d{5,})["']/i.exec(html) ||
+    /["']vimeo[_-]?id["']\s*[:=]\s*["']?(\d{5,})/i.exec(html);
   if (!m) return null;
   let hash = m[2] || null;
-  if (!hash) { const h = /[?&]h=([0-9a-f]{6,})/i.exec(html); if (h) hash = h[1]; }
+  if (!hash) {
+    const h = /[?&"']h=([0-9a-f]{6,})/i.exec(html) || /data-vimeo-hash=["']([0-9a-f]{6,})/i.exec(html);
+    if (h) hash = h[1];
+  }
   return { id: m[1], hash };
 }
 function matchUrl(html, base, re) {
@@ -485,19 +491,46 @@ function navigateTab(tabId, url, timeoutMs) {
   });
 }
 
-async function waitForVideo(tabId, timeoutMs) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+// Load a page in the (foreground) scan tab and poll until its video is
+// detected, repeatedly nudging the player to start so the manifest is fetched
+// quickly. Returns as soon as something is found.
+async function tabDetect(tabId, pageUrl) {
+  if (state.media[tabId]) delete state.media[tabId]; // drop the previous page's detections
+  navigateTab(tabId, pageUrl, NAV_WAIT_MS); // start loading; don't block on full load
+  const deadline = Date.now() + VIDEO_WAIT_MS;
+  while (Date.now() < deadline) {
     if (crawl && crawl.canceled) return null;
-    const bucket = state.media[tabId];
-    if (bucket) {
-      const items = Object.values(bucket.items);
-      const pick = items.find((i) => i.kind === 'vimeo') || items.find((i) => i.kind === 'hls') || items.find((i) => i.kind === 'direct');
-      if (pick) return pick;
-    }
-    await delayMs(250);
+    const hit = pickFromBucket(state.media[tabId]);
+    if (hit) return hit;
+    chrome.tabs.sendMessage(tabId, { cmd: 'nudgePlayer' }).catch(() => {});
+    await delayMs(600);
   }
   return null;
+}
+
+// While scanning, spoof the Referer on Vimeo player/config requests to the
+// site's origin, so domain-locked videos resolve from /config without a tab.
+const VIMEO_DNR_RULE_ID = 9090;
+async function setVimeoReferer(origin) {
+  if (!origin || !chrome.declarativeNetRequest || !chrome.declarativeNetRequest.updateSessionRules) return;
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [VIMEO_DNR_RULE_ID],
+      addRules: [{
+        id: VIMEO_DNR_RULE_ID,
+        priority: 1,
+        action: { type: 'modifyHeaders', requestHeaders: [{ header: 'referer', operation: 'set', value: origin + '/' }] },
+        condition: { urlFilter: 'player.vimeo.com', resourceTypes: ['xmlhttprequest', 'other', 'media', 'sub_frame'] },
+      }],
+    });
+  } catch (e) { /* DNR unavailable; tab fallback still works */ }
+}
+async function clearVimeoReferer() {
+  try {
+    if (chrome.declarativeNetRequest && chrome.declarativeNetRequest.updateSessionRules) {
+      await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [VIMEO_DNR_RULE_ID] });
+    }
+  } catch (e) { /* ignore */ }
 }
 
 function pickFromBucket(bucket) {
@@ -549,6 +582,7 @@ async function runCrawl(activeTab, maxDepth) {
 
   crawl = { status: 'scanning', phase: 'Scanning', current: '', depth: maxDepth, total: 0, scanned: 0, found: 0, results: [], canceled: false };
   await saveCrawl();
+  await setVimeoReferer(origin);
 
   const visited = new Set([seedUrl]);
   const resolvedUrls = new Set();
@@ -619,8 +653,7 @@ async function runCrawl(activeTab, maxDepth) {
       if (scanTabId == null) {
         try { const t = await chrome.tabs.create({ url: 'about:blank', active: true, windowId: activeTab.windowId }); scanTabId = t.id; } catch (e) { break; }
       }
-      await navigateTab(scanTabId, np.pageUrl, NAV_WAIT_MS);
-      const item = await waitForVideo(scanTabId, VIDEO_WAIT_MS);
+      const item = await tabDetect(scanTabId, np.pageUrl);
       if (item) {
         let title = np.title;
         try { const t = await chrome.tabs.get(scanTabId); if (t && t.title) title = t.title; } catch (e) { /* ignore */ }
@@ -634,6 +667,7 @@ async function runCrawl(activeTab, maxDepth) {
     try { await chrome.tabs.update(activeTab.id, { active: true }); } catch (e) { /* ignore */ }
     try { await chrome.tabs.remove(scanTabId); } catch (e) { /* ignore */ }
   }
+  await clearVimeoReferer();
   crawl.status = crawl.canceled ? 'canceled' : 'done';
   crawl.phase = '';
   crawl.current = '';

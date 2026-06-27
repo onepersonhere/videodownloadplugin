@@ -80,9 +80,31 @@
   window.addEventListener('load', () => { sendPageInfo(); scan(); });
   setTimeout(sendPageInfo, 2500);
 
+  // Poke players (during a site scan) so they start fetching their manifest,
+  // which lets network detection pick the video up quickly.
+  function nudgePlayers() {
+    try {
+      document.querySelectorAll('video').forEach((v) => {
+        try { v.muted = true; const p = v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* ignore */ }
+      });
+      document.querySelectorAll('iframe').forEach((f) => {
+        if (!/player\.vimeo\.com|vimeo\.com\/video/i.test(f.src || '')) return;
+        try { f.scrollIntoView({ block: 'center' }); } catch (e) { /* ignore */ }
+        try {
+          const w = f.contentWindow;
+          if (w) {
+            w.postMessage(JSON.stringify({ method: 'setVolume', value: 0 }), '*');
+            w.postMessage(JSON.stringify({ method: 'play' }), '*');
+          }
+        } catch (e) { /* cross-origin; ignore */ }
+      });
+    } catch (e) { /* ignore */ }
+  }
+
   // Answer the crawler: return the links on this page (for "scan linked pages").
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg) return;
+    if (msg.cmd === 'nudgePlayer') { nudgePlayers(); sendResponse({ ok: true }); return; }
     if (msg.cmd === 'getLinks') {
       const out = [];
       const seen = new Set();
